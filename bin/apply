@@ -6,12 +6,13 @@ def main(cluster)
   log("green", "applying for cluster #{cluster}")
 
   set_kube_context(cluster)
+  
+  execute("kubectl get ns")
+  # apply_cluster_level_resources(cluster)
 
-  apply_cluster_level_resources(cluster)
-
-  all_namespace_dirs(cluster).each do |dir|
-    CpEnv::NamespaceDir.new(cluster: cluster, dir: dir).apply
-  end
+  # all_namespace_dirs(cluster).each do |dir|
+  #   CpEnv::NamespaceDir.new(cluster: cluster, dir: dir).apply
+  # end
 
   log("green", "Done.")
 end
