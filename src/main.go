@@ -1,106 +1,26 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
-	"github.com/ghodss/yaml"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	k8sYaml "k8s.io/apimachinery/pkg/util/yaml"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
-// func runKubectl(args []string) error {
-// 	args = append(args, fmt.Sprintf("--namespace=%s", namespace))
+var root string = "/Users/pkrishnasamy/Documents/poornima-krishnasamy/cloud-platform-environments/namespaces/cp-2501-1602.cloud-platform.service.justice.gov.uk"
 
-// 	cmd := exec.Command("kubectl", args...)
-// 	cmd.Stderr = os.Stderr
-// 	cmd.Stdout = os.Stdout
+func kubectlApply(folder string) error {
 
-// 	return cmd.Run()
-// }
-
-func kubectlapply(file string) error {
-
-	var rawResources [][]byte
-
-	var manifest io.Reader
-
-	if strings.HasPrefix(file, "http://") || strings.HasPrefix(file, "https://") {
-		resp, err := http.Get(file)
-		if err != nil {
-			return err
-		}
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return fmt.Errorf("unable to read URL %s, server reported %d", file, resp.StatusCode)
-		}
-
-		defer resp.Body.Close()
-		manifest = resp.Body
-
-	} else if file == "-" {
-		manifest = os.Stdin
-	} else {
-		var err error
-		manifest, err = os.Open(file)
-		if err != nil {
-			return err
-		}
+	if filepath.Base(folder) == "resources" {
+		return nil
 	}
 
-	decoder := k8sYaml.NewYAMLOrJSONDecoder(manifest, 4096)
-
-	var obj *unstructured.Unstructured
-
-	for {
-		err := decoder.Decode(&obj)
-		if err != nil && err != io.EOF {
-			return fmt.Errorf("failed to unmarshal manifest: %s", err)
-		}
-
-		if obj == nil {
-			break
-		}
-
-		var resource interface{}
-
-		resource = obj
-
-		rawResource, err := yaml.Marshal(resource)
-		if err != nil {
-			return err
-		}
-
-		rawResources = append(rawResources, rawResource)
-
-		obj = nil
-	}
-
-	resourceBuffer := bytes.NewBuffer(nil)
-
-	for _, rawResource := range rawResources {
-		_, err := resourceBuffer.Write(rawResource)
-		if err != nil {
-			return err
-		}
-
-		_, err = resourceBuffer.WriteString("\n---\n")
-		if err != nil {
-			return err
-		}
-	}
-
-	kubectlArgs := []string{"apply", "-f", "-"}
+	kubectlArgs := []string{"-n", filepath.Base(folder), "apply", "-f", folder}
 
 	kubectlCommand := exec.Command("kubectl", kubectlArgs...)
-	kubectlCommand.Stdin = resourceBuffer
 	kubectlCommand.Stderr = os.Stderr
 	kubectlCommand.Stdout = os.Stdout
 
@@ -111,26 +31,107 @@ func kubectlapply(file string) error {
 	return nil
 }
 
-func listfiles(files *[]string) filepath.WalkFunc {
+func terraformApply(folder string) error {
+
+	if filepath.Base(folder) != "resources" {
+		return nil
+	}
+
+	fmt.Println(folder)
+
+	// Get the value of an Environment Variable
+	bucket := os.Getenv("PIPELINE_STATE_BUCKET")
+	key_prefix := os.Getenv("PIPELINE_STATE_KEY_PREFIX")
+	lock_table := os.Getenv("PIPELINE_TERRAFORM_STATE_LOCK_TABLE")
+	region := os.Getenv("PIPELINE_STATE_REGION")
+	cluster := os.Getenv("PIPELINE_CLUSTER")
+
+	//Checking that an environment variable is present or not.
+
+	env_vars := [3]string{
+		"TF_VAR_cluster_name",
+		"TF_VAR_cluster_state_bucket",
+		"TF_VAR_cluster_state_key"}
+
+	for _, env_var := range env_vars {
+
+		// `os.Getenv` cannot differentiate between an explicitly set empty value
+		// and an unset value. `os.LookupEnv` is preferred to `syscall.Getenv`,
+		// but it is only available in go1.5 or newer. We're using Go build tags
+		// here to use os.LookupEnv for >=go1.5
+		_, ok := os.LookupEnv(env_var)
+		if !ok {
+			fmt.Printf("required key %s missing value", env_var)
+			return nil
+		}
+
+		continue
+	}
+
+	key := key_prefix + cluster + "/" + filepath.Base(filepath.Dir(folder)) + "/terraform.tfstate"
+
+	//   cmd = [
+	//     %(terraform init),
+	//     %(-backend-config="bucket=#{bucket}"),
+	//     %(-backend-config="key=#{key}"),
+	//     %(-backend-config="dynamodb_table=#{lock_table}"),
+	//     %(-backend-config="region=#{region}")
+	//   ].join(" ")
+
+	//   execute("cd #{tf_dir}; #{cmd}")
+	if err := os.Chdir(folder); err != nil {
+		fmt.Println(err)
+		return err
+	}
+
+	kubectlArgs := []string{
+		"init",
+		fmt.Sprintf("%s=bucket=%s", "-backend-config", bucket),
+		fmt.Sprintf("%s=key=%s", "-backend-config", key),
+		fmt.Sprintf("%s=dynamodb_table=%s", "-backend-config", lock_table),
+		fmt.Sprintf("%s=region=%s", "-backend-config", region)}
+
+	fmt.Println(kubectlArgs)
+
+	kubectlCommand := exec.Command("terraform", kubectlArgs...)
+	kubectlCommand.Stderr = os.Stderr
+	kubectlCommand.Stdout = os.Stdout
+
+	if err := kubectlCommand.Run(); err != nil {
+		fmt.Println(err)
+		return err
+	}
+
+	if err := os.Chdir(root); err != nil {
+		fmt.Println(err)
+		return err
+	}
+	return nil
+}
+
+func applyNamespaceDir(folder string) {
+	// kubectlApply(folder)
+	terraformApply(folder)
+}
+
+func listFiles(files *[]string) filepath.WalkFunc {
 	return func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Fatal(err)
 		}
-		if filepath.Ext(path) == ".yaml" {
-			*files = append(*files, path)
+		if info.IsDir() {
+			fmt.Printf("skipping a dir without errors: %+v \n", info.Name())
+			return filepath.SkipDir
 		}
+		*files = append(*files, path)
 		return nil
 	}
 }
 
-func listfolders(folders *[]string) filepath.WalkFunc {
-	subDirToSkip := "resources"
+func listFolders(folders *[]string) filepath.WalkFunc {
 	return func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Fatal(err)
-		}
-		if info.IsDir() && info.Name() == subDirToSkip {
-			return filepath.SkipDir
 		}
 
 		if info.IsDir() {
@@ -144,25 +145,13 @@ func main() {
 
 	var folders []string
 
-	root := "../namespaces/cp-2501-1602.cloud-platform.service.justice.gov.uk"
-	err := filepath.Walk(root, listfolders(&folders))
+	err := filepath.Walk(root, listFolders(&folders))
 	if err != nil {
 		panic(err)
 	}
 
 	for _, folder := range folders {
-
-		var files []string
-
-		root := folder
-
-		fmt.Println(folder)
-		err := filepath.Walk(root, listfiles(&files))
-		if err != nil {
-			panic(err)
-		}
-		for _, file := range files {
-			kubectlapply(file)
-		}
+		applyNamespaceDir(folder)
 	}
+
 }
