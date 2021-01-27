@@ -37,8 +37,6 @@ func terraformApply(folder string) error {
 		return nil
 	}
 
-	fmt.Println(folder)
-
 	// Get the value of an Environment Variable
 	bucket := os.Getenv("PIPELINE_STATE_BUCKET")
 	key_prefix := os.Getenv("PIPELINE_STATE_KEY_PREFIX")
@@ -70,15 +68,6 @@ func terraformApply(folder string) error {
 
 	key := key_prefix + cluster + "/" + filepath.Base(filepath.Dir(folder)) + "/terraform.tfstate"
 
-	//   cmd = [
-	//     %(terraform init),
-	//     %(-backend-config="bucket=#{bucket}"),
-	//     %(-backend-config="key=#{key}"),
-	//     %(-backend-config="dynamodb_table=#{lock_table}"),
-	//     %(-backend-config="region=#{region}")
-	//   ].join(" ")
-
-	//   execute("cd #{tf_dir}; #{cmd}")
 	if err := os.Chdir(folder); err != nil {
 		fmt.Println(err)
 		return err
@@ -90,8 +79,6 @@ func terraformApply(folder string) error {
 		fmt.Sprintf("%s=key=%s", "-backend-config", key),
 		fmt.Sprintf("%s=dynamodb_table=%s", "-backend-config", lock_table),
 		fmt.Sprintf("%s=region=%s", "-backend-config", region)}
-
-	fmt.Println(kubectlArgs)
 
 	kubectlCommand := exec.Command("terraform", kubectlArgs...)
 	kubectlCommand.Stderr = os.Stderr
@@ -110,7 +97,7 @@ func terraformApply(folder string) error {
 }
 
 func applyNamespaceDir(folder string) {
-	// kubectlApply(folder)
+	kubectlApply(folder)
 	terraformApply(folder)
 }
 
@@ -132,6 +119,9 @@ func listFolders(folders *[]string) filepath.WalkFunc {
 	return func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Fatal(err)
+		}
+		if info.Name() == ".terraform" {
+			return filepath.SkipDir
 		}
 
 		if info.IsDir() {
