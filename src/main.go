@@ -96,9 +96,80 @@ func terraformApply(folder string) error {
 	return nil
 }
 
-func applyNamespaceDir(folder string) {
-	kubectlApply(folder)
-	terraformApply(folder)
+func applyNamespaceDir(done chan string, folder string) {
+	// kubectlApply(folder)
+
+	if filepath.Base(folder) != "resources" {
+
+		kubectlArgs := []string{"-n", filepath.Base(folder), "apply", "-f", folder}
+
+		kubectlCommand := exec.Command("kubectl", kubectlArgs...)
+		kubectlCommand.Stderr = os.Stderr
+		kubectlCommand.Stdout = os.Stdout
+
+		if err := kubectlCommand.Run(); err != nil {
+			fmt.Println(err)
+		}
+
+	}
+
+	// terraformApply(folder)
+
+	if filepath.Base(folder) == "resources" {
+
+		// Get the value of an Environment Variable
+		bucket := os.Getenv("PIPELINE_STATE_BUCKET")
+		key_prefix := os.Getenv("PIPELINE_STATE_KEY_PREFIX")
+		lock_table := os.Getenv("PIPELINE_TERRAFORM_STATE_LOCK_TABLE")
+		region := os.Getenv("PIPELINE_STATE_REGION")
+		cluster := os.Getenv("PIPELINE_CLUSTER")
+
+		//Checking that an environment variable is present or not.
+
+		env_vars := [3]string{
+			"TF_VAR_cluster_name",
+			"TF_VAR_cluster_state_bucket",
+			"TF_VAR_cluster_state_key"}
+
+		for _, env_var := range env_vars {
+
+			// `os.Getenv` cannot differentiate between an explicitly set empty value
+			// and an unset value. `os.LookupEnv` is preferred to `syscall.Getenv`,
+			// but it is only available in go1.5 or newer. We're using Go build tags
+			// here to use os.LookupEnv for >=go1.5
+			_, ok := os.LookupEnv(env_var)
+			if !ok {
+				fmt.Printf("required key %s missing value", env_var)
+			}
+			continue
+		}
+
+		key := key_prefix + cluster + "/" + filepath.Base(filepath.Dir(folder)) + "/terraform.tfstate"
+
+		if err := os.Chdir(folder); err != nil {
+			fmt.Println(err)
+		}
+
+		kubectlArgs := []string{
+			"init",
+			fmt.Sprintf("%s=bucket=%s", "-backend-config", bucket),
+			fmt.Sprintf("%s=key=%s", "-backend-config", key),
+			fmt.Sprintf("%s=dynamodb_table=%s", "-backend-config", lock_table),
+			fmt.Sprintf("%s=region=%s", "-backend-config", region)}
+
+		kubectlCommand := exec.Command("terraform", kubectlArgs...)
+		kubectlCommand.Stderr = os.Stderr
+		kubectlCommand.Stdout = os.Stdout
+
+		if err := kubectlCommand.Run(); err != nil {
+			fmt.Println(err)
+		}
+
+		if err := os.Chdir(root); err != nil {
+			fmt.Println(err)
+		}
+	}
+	done <- "kubectl apply finished"
 }
 
 func listFiles(files *[]string) filepath.WalkFunc {
@@ -135,13 +206,17 @@ func main() {
 
 	var folders []string
 
+	done := make(chan string) // make the "done" channel
+
 	err := filepath.Walk(root, listFolders(&folders))
 	if err != nil {
 		panic(err)
 	}
 
 	for _, folder := range folders {
-		applyNamespaceDir(folder)
+		go applyNamespaceDir(done, folder)
 	}
 
+	msg := <-done // receive from the channel
+	fmt.Println(msg)
 }
