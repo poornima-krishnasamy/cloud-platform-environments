@@ -7,11 +7,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
 var root string = "/Users/pkrishnasamy/Documents/poornima-krishnasamy/cloud-platform-environments/namespaces/cp-2501-1602.cloud-platform.service.justice.gov.uk"
+
+type Result struct {
+	Error    string
+	Response string
+	Folder   string
+}
 
 func kubectlApply(folder string) error {
 
@@ -127,7 +136,9 @@ func listFolders(folders *[]string) filepath.WalkFunc {
 	}
 }
 
-func applyNamespaceDir(folder string) (tferror string, resp string) {
+func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
+	defer wg.Done()
+	var result Result
 
 	var outb, errb bytes.Buffer
 
@@ -140,6 +151,8 @@ func applyNamespaceDir(folder string) (tferror string, resp string) {
 		kubectlCommand.Stdout = &outb
 		kubectlCommand.Stderr = &errb
 		kubectlCommand.Run()
+
+		result = Result{Error: errb.String(), Response: outb.String(), Folder: folder}
 
 	}
 
@@ -154,28 +167,16 @@ func applyNamespaceDir(folder string) (tferror string, resp string) {
 
 		//Checking that an environment variable is present or not.
 
-		env_vars := [3]string{
-			"TF_VAR_cluster_name",
-			"TF_VAR_cluster_state_bucket",
-			"TF_VAR_cluster_state_key"}
-
-		for _, env_var := range env_vars {
-
-			// `os.Getenv` cannot differentiate between an explicitly set empty value
-			// and an unset value. `os.LookupEnv` is preferred to `syscall.Getenv`,
-			// but it is only available in go1.5 or newer. We're using Go build tags
-			// here to use os.LookupEnv for >=go1.5
-			_, ok := os.LookupEnv(env_var)
-			if !ok {
-				return
-			}
-
-			continue
-		}
-
 		key := key_prefix + cluster + "/" + filepath.Base(filepath.Dir(folder)) + "/terraform.tfstate"
 
 		os.Chdir(folder)
+
+		// err := os.RemoveAll(filepath.Join(folder, ".terraform"))
+		// if err != nil {
+		// 	result = Result{Error: "Cant remove .terraform folders", Response: "", Folder: folder}
+		// 	results <- result
+		// 	return
+		// }
 
 		kubectlArgs := []string{
 			"init",
@@ -190,38 +191,53 @@ func applyNamespaceDir(folder string) (tferror string, resp string) {
 		Command.Stderr = &errb
 		Command.Run()
 
-		os.Chdir(root)
+		kubectlArgs = []string{"plan"}
+
+		Command = exec.Command("terraform", kubectlArgs...)
+
+		Command.Stdout = &outb
+		Command.Stderr = &errb
+		Command.Run()
+
+		result = Result{Error: errb.String(), Response: outb.String(), Folder: folder}
+
 	}
 
-	return errb.String(), outb.String()
+	results <- result
+
+}
+
+func monitorResults(wg *sync.WaitGroup, results chan Result) {
+	wg.Wait()
+	close(results)
 }
 
 func main() {
 
-	type Result struct {
-		Error    string
-		Response string
-	}
-	checkStatus := func(done <-chan interface{}, folders ...string) <-chan Result {
-		results := make(chan Result)
-		go func() {
-			defer close(results)
+	fmt.Printf("START TIME %s \n", time.Now().String())
 
-			for _, folder := range folders {
-				var result Result
-				err, resp := applyNamespaceDir(folder)
-				result = Result{Error: err, Response: resp}
-				select {
-				case <-done:
-					return
-				case results <- result:
-				}
-			}
-		}()
-		return results
+	fmt.Println("Version", runtime.Version())
+	fmt.Println("NumCPU", runtime.NumCPU())
+	fmt.Println("GOMAXPROCS", runtime.GOMAXPROCS(0))
+
+	env_vars := [3]string{
+		"TF_VAR_cluster_name",
+		"TF_VAR_cluster_state_bucket",
+		"TF_VAR_cluster_state_key"}
+
+	for _, env_var := range env_vars {
+
+		// `os.Getenv` cannot differentiate between an explicitly set empty value
+		// and an unset value. `os.LookupEnv` is preferred to `syscall.Getenv`,
+		// but it is only available in go1.5 or newer. We're using Go build tags
+		// here to use os.LookupEnv for >=go1.5
+		_, ok := os.LookupEnv(env_var)
+		if !ok {
+			panic(ok)
+		}
+
+		continue
 	}
-	done := make(chan interface{})
-	defer close(done)
 
 	var folders []string
 
@@ -229,12 +245,34 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	for result := range checkStatus(done, folders...) {
+
+	results := make(chan Result)
+
+	wg := &sync.WaitGroup{}
+
+	fmt.Println("Running for loop...")
+
+	for _, folder := range folders {
+
+		wg.Add(1)
+
+		fmt.Println("Applying folder", folder)
+		go applyNamespaceDir(wg, results, folder)
+	}
+
+	fmt.Println("Finished for loop")
+
+	go monitorResults(wg, results)
+
+	for result := range results {
+		fmt.Printf("Folder: %v\n", result.Folder)
 		if result.Error != "" {
 			fmt.Printf("error: %v", result.Error)
 			continue
 		}
 		fmt.Printf("Response: %v\n", result.Response)
 	}
+
+	fmt.Printf("END TIME %s \n", time.Now().String())
 
 }
