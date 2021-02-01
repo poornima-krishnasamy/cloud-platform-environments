@@ -3,6 +3,8 @@
 require File.join(".", File.dirname(__FILE__), "..", "lib", "cp_env")
 
 def main(cluster)
+  time1 = Time.new
+puts "Start Time : " + time1.inspect
   log("green", "applying for cluster #{cluster}")
 
   set_kube_context(cluster)
@@ -14,6 +16,8 @@ def main(cluster)
   end
 
   log("green", "Done.")
+  time2 = Time.new
+puts "End Time : " + time2.inspect
 end
 
 main ENV.fetch("PIPELINE_CLUSTER")
