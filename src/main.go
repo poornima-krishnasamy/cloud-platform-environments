@@ -22,88 +22,89 @@ type Result struct {
 	Folder   string
 }
 
-func kubectlApply(folder string) error {
+func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
+	defer wg.Done()
+	var result Result
 
-	if filepath.Base(folder) == "resources" {
-		return nil
-	}
-
-	kubectlArgs := []string{"-n", filepath.Base(folder), "apply", "-f", folder}
-
-	kubectlCommand := exec.Command("kubectl", kubectlArgs...)
-	kubectlCommand.Stderr = os.Stderr
-	kubectlCommand.Stdout = os.Stdout
-
-	if err := kubectlCommand.Run(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func terraformApply(folder string) error {
+	var outb, errb bytes.Buffer
 
 	if filepath.Base(folder) != "resources" {
-		return nil
+
+		kubectlArgs := []string{"-n", filepath.Base(folder), "apply", "-f", folder}
+
+		kubectlCommand := exec.Command("kubectl", kubectlArgs...)
+
+		kubectlCommand.Stdout = &outb
+		kubectlCommand.Stderr = &errb
+		kubectlCommand.Run()
+
+		result = Result{Error: errb.String(), Response: outb.String(), Folder: folder}
+
 	}
 
-	// Get the value of an Environment Variable
-	bucket := os.Getenv("PIPELINE_STATE_BUCKET")
-	key_prefix := os.Getenv("PIPELINE_STATE_KEY_PREFIX")
-	lock_table := os.Getenv("PIPELINE_TERRAFORM_STATE_LOCK_TABLE")
-	region := os.Getenv("PIPELINE_STATE_REGION")
-	cluster := os.Getenv("PIPELINE_CLUSTER")
+	if filepath.Base(folder) == "resources" {
 
-	//Checking that an environment variable is present or not.
+		// Get the value of an Environment Variable
+		bucket := os.Getenv("PIPELINE_STATE_BUCKET")
+		key_prefix := os.Getenv("PIPELINE_STATE_KEY_PREFIX")
+		lock_table := os.Getenv("PIPELINE_TERRAFORM_STATE_LOCK_TABLE")
+		region := os.Getenv("PIPELINE_STATE_REGION")
+		cluster := os.Getenv("PIPELINE_CLUSTER")
 
-	env_vars := [3]string{
-		"TF_VAR_cluster_name",
-		"TF_VAR_cluster_state_bucket",
-		"TF_VAR_cluster_state_key"}
+		// //Checking that an environment variable is present or not.
 
-	for _, env_var := range env_vars {
+		key := key_prefix + cluster + "/" + filepath.Base(filepath.Dir(folder)) + "/terraform.tfstate"
 
-		// `os.Getenv` cannot differentiate between an explicitly set empty value
-		// and an unset value. `os.LookupEnv` is preferred to `syscall.Getenv`,
-		// but it is only available in go1.5 or newer. We're using Go build tags
-		// here to use os.LookupEnv for >=go1.5
-		_, ok := os.LookupEnv(env_var)
-		if !ok {
-			fmt.Printf("required key %s missing value", env_var)
-			return nil
-		}
+		// // err := os.RemoveAll(filepath.Join(folder, ".terraform"))
+		// // if err != nil {
+		// // 	result = Result{Error: "Cant remove .terraform folders", Response: "", Folder: folder}
+		// // 	results <- result
+		// // 	return
+		// // }
 
-		continue
+		kubectlArgs := []string{
+			"init",
+			fmt.Sprintf("%s=bucket=%s", "-backend-config", bucket),
+			fmt.Sprintf("%s=key=%s", "-backend-config", key),
+			fmt.Sprintf("%s=dynamodb_table=%s", "-backend-config", lock_table),
+			fmt.Sprintf("%s=region=%s", "-backend-config", region)}
+
+		Command := exec.Command("terraform", kubectlArgs...)
+
+		Command.Dir = folder
+		Command.Stdout = &outb
+		Command.Stderr = &errb
+		Command.Run()
+
+		kubectlArgs = []string{"plan"}
+
+		Command = exec.Command("terraform", kubectlArgs...)
+
+		Command.Dir = folder
+		Command.Stdout = &outb
+		Command.Stderr = &errb
+		Command.Run()
+
+		kubectlArgs = []string{"apply"}
+
+		Command = exec.Command("terraform", kubectlArgs...)
+
+		Command.Dir = folder
+		Command.Stdout = &outb
+		Command.Stderr = &errb
+		Command.Run()
+
+		result = Result{Error: errb.String(), Response: outb.String(), Folder: folder}
+
 	}
 
-	key := key_prefix + cluster + "/" + filepath.Base(filepath.Dir(folder)) + "/terraform.tfstate"
+	results <- result
 
-	if err := os.Chdir(folder); err != nil {
-		fmt.Println(err)
-		return err
-	}
+}
 
-	kubectlArgs := []string{
-		"init",
-		fmt.Sprintf("%s=bucket=%s", "-backend-config", bucket),
-		fmt.Sprintf("%s=key=%s", "-backend-config", key),
-		fmt.Sprintf("%s=dynamodb_table=%s", "-backend-config", lock_table),
-		fmt.Sprintf("%s=region=%s", "-backend-config", region)}
-
-	kubectlCommand := exec.Command("terraform", kubectlArgs...)
-	kubectlCommand.Stderr = os.Stderr
-	kubectlCommand.Stdout = os.Stdout
-
-	if err := kubectlCommand.Run(); err != nil {
-		fmt.Println(err)
-		return err
-	}
-
-	if err := os.Chdir(root); err != nil {
-		fmt.Println(err)
-		return err
-	}
-	return nil
+func monitorResults(wg *sync.WaitGroup, results chan Result) {
+	wg.Wait()
+	close(results)
 }
 
 func listFiles(files *[]string) filepath.WalkFunc {
@@ -134,82 +135,6 @@ func listFolders(folders *[]string) filepath.WalkFunc {
 		}
 		return nil
 	}
-}
-
-func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
-	defer wg.Done()
-	var result Result
-
-	var outb, errb bytes.Buffer
-
-	if filepath.Base(folder) != "resources" {
-
-		kubectlArgs := []string{"-n", filepath.Base(folder), "apply", "-f", folder}
-
-		kubectlCommand := exec.Command("kubectl", kubectlArgs...)
-
-		kubectlCommand.Stdout = &outb
-		kubectlCommand.Stderr = &errb
-		kubectlCommand.Run()
-
-		result = Result{Error: errb.String(), Response: outb.String(), Folder: folder}
-
-	}
-
-	if filepath.Base(folder) == "resources" {
-
-		// Get the value of an Environment Variable
-		bucket := os.Getenv("PIPELINE_STATE_BUCKET")
-		key_prefix := os.Getenv("PIPELINE_STATE_KEY_PREFIX")
-		lock_table := os.Getenv("PIPELINE_TERRAFORM_STATE_LOCK_TABLE")
-		region := os.Getenv("PIPELINE_STATE_REGION")
-		cluster := os.Getenv("PIPELINE_CLUSTER")
-
-		//Checking that an environment variable is present or not.
-
-		key := key_prefix + cluster + "/" + filepath.Base(filepath.Dir(folder)) + "/terraform.tfstate"
-
-		os.Chdir(folder)
-
-		// err := os.RemoveAll(filepath.Join(folder, ".terraform"))
-		// if err != nil {
-		// 	result = Result{Error: "Cant remove .terraform folders", Response: "", Folder: folder}
-		// 	results <- result
-		// 	return
-		// }
-
-		kubectlArgs := []string{
-			"init",
-			fmt.Sprintf("%s=bucket=%s", "-backend-config", bucket),
-			fmt.Sprintf("%s=key=%s", "-backend-config", key),
-			fmt.Sprintf("%s=dynamodb_table=%s", "-backend-config", lock_table),
-			fmt.Sprintf("%s=region=%s", "-backend-config", region)}
-
-		Command := exec.Command("terraform", kubectlArgs...)
-
-		Command.Stdout = &outb
-		Command.Stderr = &errb
-		Command.Run()
-
-		kubectlArgs = []string{"plan"}
-
-		Command = exec.Command("terraform", kubectlArgs...)
-
-		Command.Stdout = &outb
-		Command.Stderr = &errb
-		Command.Run()
-
-		result = Result{Error: errb.String(), Response: outb.String(), Folder: folder}
-
-	}
-
-	results <- result
-
-}
-
-func monitorResults(wg *sync.WaitGroup, results chan Result) {
-	wg.Wait()
-	close(results)
 }
 
 func main() {
@@ -252,12 +177,13 @@ func main() {
 
 	fmt.Println("Running for loop...")
 
+	// TODO: create a pool of threads and spread the folders to the given threads. This is because
+	// The number of max threads which can call the AWS api should be limited to avoid exceeding the rate limits
+
 	for _, folder := range folders {
-
 		wg.Add(1)
-
-		fmt.Println("Applying folder", folder)
 		go applyNamespaceDir(wg, results, folder)
+
 	}
 
 	fmt.Println("Finished for loop")
@@ -266,6 +192,7 @@ func main() {
 
 	for result := range results {
 		fmt.Printf("Folder: %v\n", result.Folder)
+
 		if result.Error != "" {
 			fmt.Printf("error: %v", result.Error)
 			continue
