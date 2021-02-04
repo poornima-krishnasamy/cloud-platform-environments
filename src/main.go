@@ -16,19 +16,19 @@ import (
 
 var root string = "/Users/pkrishnasamy/Documents/poornima-krishnasamy/cloud-platform-environments/namespaces/cp-2501-1602.cloud-platform.service.justice.gov.uk"
 
-type Result struct {
-	Error    string
+type Results struct {
 	Response string
+	Error    string
 	Folder   string
 }
 
-func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
+func applyNamespaceDirs(wg *sync.WaitGroup, results chan Results, chunkFolder []string) {
 	defer wg.Done()
-	var result Result
 
-	var outb, errb bytes.Buffer
+	for _, folder := range chunkFolder {
+		var result Results
 
-	if filepath.Base(folder) != "resources" {
+		var outb, errb bytes.Buffer
 
 		kubectlArgs := []string{"-n", filepath.Base(folder), "apply", "-f", folder}
 
@@ -38,11 +38,9 @@ func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
 		kubectlCommand.Stderr = &errb
 		kubectlCommand.Run()
 
-		result = Result{Error: errb.String(), Response: outb.String(), Folder: folder}
+		result = Results{Response: errb.String(), Error: errb.String(), Folder: folder}
 
-	}
-
-	if filepath.Base(folder) == "resources" {
+		// results <- result
 
 		// Get the value of an Environment Variable
 		bucket := os.Getenv("PIPELINE_STATE_BUCKET")
@@ -53,7 +51,7 @@ func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
 
 		// //Checking that an environment variable is present or not.
 
-		key := key_prefix + cluster + "/" + filepath.Base(filepath.Dir(folder)) + "/terraform.tfstate"
+		key := key_prefix + cluster + "/" + filepath.Base(folder) + "/terraform.tfstate"
 
 		// // err := os.RemoveAll(filepath.Join(folder, ".terraform"))
 		// // if err != nil {
@@ -62,7 +60,7 @@ func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
 		// // 	return
 		// // }
 
-		kubectlArgs := []string{
+		kubectlArgs = []string{
 			"init",
 			fmt.Sprintf("%s=bucket=%s", "-backend-config", bucket),
 			fmt.Sprintf("%s=key=%s", "-backend-config", key),
@@ -71,7 +69,7 @@ func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
 
 		Command := exec.Command("terraform", kubectlArgs...)
 
-		Command.Dir = folder
+		Command.Dir = folder + "/resources"
 		Command.Stdout = &outb
 		Command.Stderr = &errb
 		Command.Run()
@@ -80,7 +78,7 @@ func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
 
 		Command = exec.Command("terraform", kubectlArgs...)
 
-		Command.Dir = folder
+		Command.Dir = folder + "/resources"
 		Command.Stdout = &outb
 		Command.Stderr = &errb
 		Command.Run()
@@ -89,20 +87,19 @@ func applyNamespaceDir(wg *sync.WaitGroup, results chan Result, folder string) {
 
 		Command = exec.Command("terraform", kubectlArgs...)
 
-		Command.Dir = folder
+		Command.Dir = folder + "/resources"
 		Command.Stdout = &outb
 		Command.Stderr = &errb
 		Command.Run()
 
-		result = Result{Error: errb.String(), Response: outb.String(), Folder: folder}
+		result = Results{Response: outb.String(), Error: errb.String(), Folder: folder}
 
+		results <- result
 	}
-
-	results <- result
 
 }
 
-func monitorResults(wg *sync.WaitGroup, results chan Result) {
+func monitorResults(wg *sync.WaitGroup, results chan Results) {
 	wg.Wait()
 	close(results)
 }
@@ -126,7 +123,7 @@ func listFolders(folders *[]string) filepath.WalkFunc {
 		if err != nil {
 			log.Fatal(err)
 		}
-		if info.Name() == ".terraform" {
+		if info.Name() == ".terraform" || info.Name() == "resources" {
 			return filepath.SkipDir
 		}
 
@@ -144,6 +141,8 @@ func main() {
 	fmt.Println("Version", runtime.Version())
 	fmt.Println("NumCPU", runtime.NumCPU())
 	fmt.Println("GOMAXPROCS", runtime.GOMAXPROCS(0))
+
+	const nRoutines int = 4
 
 	env_vars := [3]string{
 		"TF_VAR_cluster_name",
@@ -171,33 +170,49 @@ func main() {
 		panic(err)
 	}
 
-	results := make(chan Result)
+	fmt.Println("Number of folders", len(folders))
+
+	nChunks := len(folders) / nRoutines
+
+	fmt.Println("Number of folders per chunk", nChunks)
+
+	var folderChunks [][]string
+	for {
+		if len(folders) == 0 {
+			break
+		}
+
+		if len(folders) < nChunks {
+			nChunks = len(folders)
+		}
+
+		folderChunks = append(folderChunks, folders[0:nChunks])
+		folders = folders[nChunks:]
+	}
+
+	results := make(chan Results)
 
 	wg := &sync.WaitGroup{}
-
-	fmt.Println("Running for loop...")
 
 	// TODO: create a pool of threads and spread the folders to the given threads. This is because
 	// The number of max threads which can call the AWS api should be limited to avoid exceeding the rate limits
 
-	for _, folder := range folders {
+	fmt.Println("Number of Chunks", len(folderChunks))
+	for i := 0; i < len(folderChunks); i++ {
 		wg.Add(1)
-		go applyNamespaceDir(wg, results, folder)
+		go applyNamespaceDirs(wg, results, folderChunks[i])
 
 	}
-
-	fmt.Println("Finished for loop")
 
 	go monitorResults(wg, results)
 
 	for result := range results {
 		fmt.Printf("Folder: %v\n", result.Folder)
-
+		fmt.Printf("Response: %v\n", result.Response)
 		if result.Error != "" {
-			fmt.Printf("error: %v", result.Error)
+			fmt.Printf("Error: %v", result.Error)
 			continue
 		}
-		fmt.Printf("Response: %v\n", result.Response)
 	}
 
 	fmt.Printf("END TIME %s \n", time.Now().String())
